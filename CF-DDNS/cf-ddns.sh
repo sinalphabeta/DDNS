@@ -66,13 +66,13 @@ need_cmd jq
 [ -z "$RECORD_TYPE" ] && echo "RECORD_TYPE 未设置" && exit 1
 
 case "$RECORD_TYPE" in
-    A)    IP_API_URL="https://v4.ipgg.cn/ip"; DNS_TYPE="A" ;;
-    AAAA) IP_API_URL="https://v6.ipgg.cn/ip"; DNS_TYPE="AAAA" ;;
+    A)    IP_URL="ip.sb"; CURL_OPTS="-4"; DNS_TYPE="A" ;;
+    AAAA) IP_URL="ip.sb"; CURL_OPTS="-6"; DNS_TYPE="AAAA" ;;
     *)    echo "RECORD_TYPE 必须为 A 或 AAAA" && exit 1 ;;
 esac
 
 echo "正在获取当前出口IP..."
-CURRENT_IP=$(curl -s --max-time 10 "$IP_API_URL" | jq -r '.ip')
+CURRENT_IP=$(curl -s --max-time 10 $CURL_OPTS "$IP_URL")
 [[ ! "$CURRENT_IP" =~ ^[0-9a-fA-F\.:]+$ ]] && echo "获取出口 IP 失败: $CURRENT_IP" && exit 1
 echo "当前出口IP: $CURRENT_IP"
 
