@@ -47,8 +47,19 @@ echo -e "Configuring Crontab..."
 CRON_JOB="*/1 * * * * $INSTALL_DIR/$SCRIPT_NAME $INSTALL_DIR/$CONF_NAME >> /var/log/ddns.log 2>&1"
 CRON_CLEAN="0 0 * * * > /var/log/ddns.log"
 
-(crontab -l 2>/dev/null | grep -v "$SCRIPT_NAME"; echo "$CRON_JOB") | crontab -
-(crontab -l 2>/dev/null | grep -v "/var/log/ddns.log"; echo "$CRON_CLEAN") | crontab -
+# Backup current crontab
+crontab -l > /tmp/cron.bak 2>/dev/null
+
+# Remove existing managed lines to prevent duplicates
+grep -v "$SCRIPT_NAME" /tmp/cron.bak | grep -v "> /var/log/ddns.log" > /tmp/cron.new
+
+# Append new jobs
+echo "$CRON_JOB" >> /tmp/cron.new
+echo "$CRON_CLEAN" >> /tmp/cron.new
+
+# Install new crontab
+crontab /tmp/cron.new
+rm -f /tmp/cron.bak /tmp/cron.new
 
 echo -e "${GREEN}Installation Complete!${NC}"
 echo -e "Please edit config file: ${YELLOW}$INSTALL_DIR/$CONF_NAME${NC}"
