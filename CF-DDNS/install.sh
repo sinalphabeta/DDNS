@@ -44,14 +44,14 @@ chmod +x "$SCRIPT_NAME"
 
 # Configure Cron
 echo -e "Configuring Crontab..."
-CRON_JOB="*/1 * * * * $INSTALL_DIR/$SCRIPT_NAME $INSTALL_DIR/$CONF_NAME >> /var/log/ddns.log 2>&1"
-CRON_CLEAN="0 0 * * * > /var/log/ddns.log"
+CRON_JOB="*/1 * * * * $INSTALL_DIR/$SCRIPT_NAME $INSTALL_DIR/$CONF_NAME >> /var/log/cf-ddns.log 2>&1"
+CRON_CLEAN="*/30 * * * * > /var/log/cf-ddns.log"
 
 # Backup current crontab
 crontab -l > /tmp/cron.bak 2>/dev/null
 
 # Remove existing managed lines to prevent duplicates
-grep -v "$SCRIPT_NAME" /tmp/cron.bak | grep -v "> /var/log/ddns.log" > /tmp/cron.new
+grep -v "$SCRIPT_NAME" /tmp/cron.bak | grep -v "> /var/log/cf-ddns.log" | grep -v "> /var/log/ddns.log" > /tmp/cron.new
 
 # Append new jobs
 echo "$CRON_JOB" >> /tmp/cron.new
