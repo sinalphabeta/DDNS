@@ -30,6 +30,7 @@ get_dns_ip() {
     
     echo "正在查询DNS记录: $name ($type)" >&2
     
+    # 1. 尝试使用 dig
     if command -v dig >/dev/null 2>&1; then
         local ip=$(dig +short "$name" "$type" | head -1)
         if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
@@ -39,6 +40,7 @@ get_dns_ip() {
         fi
     fi
     
+    # 2. 尝试使用 nslookup
     if command -v nslookup >/dev/null 2>&1; then
         local ip
         if [ "$type" = "A" ]; then
@@ -52,29 +54,29 @@ get_dns_ip() {
             return
         fi
     fi
+
+    # 3. 尝试使用 ping
+    local ping_cmd="ping"
+    [ "$type" = "AAAA" ] && ping_cmd="ping6"
     
-    echo "DNS查询失败，记录可能不存在" >&2
+    if command -v "$ping_cmd" >/dev/null 2>&1; then
+        # ping 输出格式通常为: PING example.com (93.184.216.34) ...
+        # 使用 sed/awk 提取括号内的 IP
+        local ip=$($ping_cmd -c 1 -W 1 "$name" 2>/dev/null | head -1 | grep -oE '\((([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F:]+)\)' | tr -d '()')
+        
+        if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
+            echo "通过$ping_cmd获取到DNS IP: $ip" >&2
+            echo "$ip"
+            return
+        fi
+    fi
+    
+    echo "本地DNS查询失败（缺少工具或记录未生效），将直接检查Cloudflare API" >&2
     echo ""
 }
 
 need_cmd curl
 need_cmd jq
-
-# 检查并安装 DNS 工具
-if ! command -v dig >/dev/null 2>&1 && ! command -v nslookup >/dev/null 2>&1; then
-    echo "未找到 dig 或 nslookup，正在根据系统尝试自动安装 DNS 工具..."
-    if [ -f /etc/debian_version ]; then
-        apt update -qq && apt install -y -qq dnsutils
-    elif [ -f /etc/redhat-release ]; then
-        yum install -y bind-utils
-    elif [ -f /etc/alpine-release ]; then
-        apk add bind-tools
-    elif command -v opkg >/dev/null 2>&1; then
-        opkg update && opkg install bind-dig
-    else
-        echo "无法识别的系统或无法自动安装，将跳过本地 DNS 查询"
-    fi
-fi
 
 [ -z "$CF_API_TOKEN" ] && echo "CF_API_TOKEN 未设置" && exit 1
 [ -z "$DOMAIN" ] && echo "DOMAIN 未设置" && exit 1
