@@ -55,14 +55,31 @@ get_dns_ip() {
         fi
     fi
 
-    # 3. 尝试使用 ping
+    # 3. 尝试使用 getent（glibc 自带，比 ping 更可靠）
+    if command -v getent >/dev/null 2>&1; then
+        local ip
+        if [ "$type" = "A" ]; then
+            # getent ahostsv4 只返回 IPv4
+            ip=$(getent ahostsv4 "$name" 2>/dev/null | awk '{print $1; exit}')
+        else
+            # getent ahostsv6 只返回 IPv6
+            ip=$(getent ahostsv6 "$name" 2>/dev/null | awk '{print $1; exit}')
+        fi
+        if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
+            echo "通过getent获取到DNS IP: $ip" >&2
+            echo "$ip"
+            return
+        fi
+    fi
+
+    # 4. 尝试使用 ping（作为最后的备选）
     local ping_cmd="ping"
     [ "$type" = "AAAA" ] && ping_cmd="ping6"
     
     if command -v "$ping_cmd" >/dev/null 2>&1; then
-        # ping 输出格式通常为: PING example.com (93.184.216.34) ...
-        # 使用 sed/awk 提取括号内的 IP
-        local ip=$($ping_cmd -c 1 -W 1 "$name" 2>/dev/null | head -1 | grep -oE '\((([0-9]{1,3}\.){3}[0-9]{1,3}|[0-9a-fA-F:]+)\)' | tr -d '()')
+        # ping 输出格式: PING example.com (93.184.216.34) 56(84) bytes of data.
+        # 使用 awk 按括号分割，取第一个括号内的内容（即 IP 地址）
+        local ip=$($ping_cmd -c 1 -W 1 "$name" 2>/dev/null | head -1 | awk -F'[()]' '{print $2}')
         
         if [[ "$ip" =~ ^[0-9a-fA-F\.:]+$ ]]; then
             echo "通过$ping_cmd获取到DNS IP: $ip" >&2
