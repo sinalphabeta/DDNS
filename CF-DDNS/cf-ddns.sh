@@ -1,9 +1,85 @@
 #!/bin/bash
 
-CONFIG_FILE="$1"
-[ -z "$CONFIG_FILE" ] && echo "使用方法: $0 <配置文件路径>" && exit 1
-[ ! -f "$CONFIG_FILE" ] && echo "配置文件不存在: $CONFIG_FILE" && exit 1
-source "$CONFIG_FILE"
+usage() {
+    cat <<EOF
+使用方法:
+  $0 <配置文件路径>
+  $0 --config <配置文件路径>
+  $0 --token <API Token> --domain <主域名> --subdomain <子域名> [--type A|AAAA]
+
+参数:
+  -c, --config      配置文件路径 (可与命令行参数混用，命令行参数优先)
+      --token       Cloudflare API Token
+      --domain      主域名，如 example.com
+      --subdomain   子域名，如 home
+      --type        记录类型 A 或 AAAA (默认 A)
+      --tg-token    Telegram Bot Token (可选，配置后 IP 变化时发送通知)
+      --tg-chat-id  Telegram Chat ID (可选，个人或群组 ID)
+  -h, --help        显示帮助
+EOF
+}
+
+CONFIG_FILE=""
+ARG_TOKEN=""
+ARG_DOMAIN=""
+ARG_SUBDOMAIN=""
+ARG_TYPE=""
+ARG_TG_TOKEN=""
+ARG_TG_CHAT_ID=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -c|--config)  CONFIG_FILE="$2"; shift 2 ;;
+        --token)      ARG_TOKEN="$2"; shift 2 ;;
+        --domain)     ARG_DOMAIN="$2"; shift 2 ;;
+        --subdomain)  ARG_SUBDOMAIN="$2"; shift 2 ;;
+        --type)       ARG_TYPE="$2"; shift 2 ;;
+        --tg-token)   ARG_TG_TOKEN="$2"; shift 2 ;;
+        --tg-chat-id) ARG_TG_CHAT_ID="$2"; shift 2 ;;
+        -h|--help)    usage; exit 0 ;;
+        -*)           echo "未知参数: $1"; usage; exit 1 ;;
+        *)            CONFIG_FILE="$1"; shift ;;
+    esac
+done
+
+if [ -n "$CONFIG_FILE" ]; then
+    [ ! -f "$CONFIG_FILE" ] && echo "配置文件不存在: $CONFIG_FILE" && exit 1
+    source "$CONFIG_FILE"
+fi
+
+# 命令行参数优先于配置文件
+[ -n "$ARG_TOKEN" ] && CF_API_TOKEN="$ARG_TOKEN"
+[ -n "$ARG_DOMAIN" ] && DOMAIN="$ARG_DOMAIN"
+[ -n "$ARG_SUBDOMAIN" ] && SUBDOMAIN="$ARG_SUBDOMAIN"
+[ -n "$ARG_TYPE" ] && RECORD_TYPE="$ARG_TYPE"
+[ -n "$ARG_TG_TOKEN" ] && TG_BOT_TOKEN="$ARG_TG_TOKEN"
+[ -n "$ARG_TG_CHAT_ID" ] && TG_CHAT_ID="$ARG_TG_CHAT_ID"
+RECORD_TYPE="${RECORD_TYPE:-A}"
+
+# 发送 Telegram 通知: $1=旧IP $2=新IP
+send_telegram() {
+    [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ] && return 0
+    local old_ip="$1" new_ip="$2"
+    local msg="🔔 <b>Cloudflare DDNS 更新通知</b>
+
+🌐 域名: <code>$record_name</code>
+📋 类型: <code>$RECORD_TYPE</code>
+🔴 旧IP: <code>$old_ip</code>
+🟢 新IP: <code>$new_ip</code>
+🕐 时间: <code>$(date '+%Y-%m-%d %H:%M:%S')</code>"
+
+    local tg_resp
+    tg_resp=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+        --data-urlencode "chat_id=$TG_CHAT_ID" \
+        --data-urlencode "text=$msg" \
+        --data-urlencode "parse_mode=HTML")
+    echo "$tg_resp" | grep -q '"ok":true' && echo "Telegram 通知已发送" || echo "Telegram 通知发送失败: $tg_resp"
+}
+
+if [ -z "$CONFIG_FILE" ] && [ -z "$CF_API_TOKEN" ]; then
+    usage
+    exit 1
+fi
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -90,6 +166,7 @@ RECORD_IP=$(echo "$record_json" | jq -r '.result[0].content')
 
 if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
     # 确实没有记录，创建新的
+    OLD_IP="无 (新建记录)"
     echo "记录不存在，创建中..."
     response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
         -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
@@ -100,13 +177,17 @@ else
         echo "出口 IP 与 Cloudflare 记录一致，无需更新 ($CURRENT_IP)"
         exit 0
     fi
+    OLD_IP="$RECORD_IP"
     echo "IP不一致 (Cloudflare=$RECORD_IP, 当前=$CURRENT_IP)，更新中... Record ID: $RECORD_ID"
     response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
         -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
         --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":60,\"proxied\":false}")
 fi
 
-echo "$response" | grep -q '"success":true' && echo "更新成功: $record_name -> $CURRENT_IP" || {
+echo "$response" | grep -q '"success":true' && {
+    echo "更新成功: $record_name -> $CURRENT_IP"
+    send_telegram "$OLD_IP" "$CURRENT_IP"
+} || {
     echo "更新失败"
     echo "$response"
     exit 1
