@@ -83,17 +83,16 @@ if [ -n "$DDNS_ARGS" ]; then
 else
     CRON_JOB="*/1 * * * * $INSTALL_DIR/$SCRIPT_NAME $INSTALL_DIR/$CONF_NAME >> /var/log/cf-ddns.log 2>&1"
 fi
-CRON_CLEAN="*/30 * * * * > /var/log/cf-ddns.log"
 
 # Backup current crontab
 crontab -l > /tmp/cron.bak 2>/dev/null
 
 # Remove existing managed lines to prevent duplicates
+# (also removes the old log-clean job from previous versions)
 grep -v "$SCRIPT_NAME" /tmp/cron.bak | grep -v "> /var/log/cf-ddns.log" | grep -v "> /var/log/ddns.log" > /tmp/cron.new
 
-# Append new jobs
+# Append new job (log rotation is handled by cf-ddns.sh itself)
 echo "$CRON_JOB" >> /tmp/cron.new
-echo "$CRON_CLEAN" >> /tmp/cron.new
 
 # Install new crontab
 crontab /tmp/cron.new

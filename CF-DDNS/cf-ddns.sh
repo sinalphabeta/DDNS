@@ -81,6 +81,18 @@ if [ -z "$CONFIG_FILE" ] && [ -z "$CF_API_TOKEN" ]; then
     exit 1
 fi
 
+# 日志自维护: 超过 MAX_LOG_LINES 行时只保留最近的部分 (可通过环境变量覆盖)
+LOG_FILE="${LOG_FILE:-/var/log/cf-ddns.log}"
+MAX_LOG_LINES="${MAX_LOG_LINES:-1000}"
+if [ -w "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE")" -gt "$MAX_LOG_LINES" ]; then
+    tail -n "$MAX_LOG_LINES" "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
+fi
+
+# log_info: 过程信息，仅交互终端显示 (cron 运行时静默，避免日志膨胀)
+log_info() { [ -t 1 ] && echo "$@"; return 0; }
+# log_event: 重要事件，始终输出并带时间戳
+log_event() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || {
         echo "缺少命令: $1，尝试安装..."
@@ -114,41 +126,41 @@ case "$RECORD_TYPE" in
     *)    echo "RECORD_TYPE 必须为 A 或 AAAA" && exit 1 ;;
 esac
 
-echo "正在获取当前出口IP..."
+log_info "正在获取当前出口IP..."
 CURRENT_IP=$(curl -s --max-time 10 $CURL_OPTS "$IP_URL")
-[[ ! "$CURRENT_IP" =~ ^[0-9a-fA-F\.:]+$ ]] && echo "获取出口 IP 失败: $CURRENT_IP" && exit 1
-echo "当前出口IP: $CURRENT_IP"
+[[ ! "$CURRENT_IP" =~ ^[0-9a-fA-F\.:]+$ ]] && log_event "获取出口 IP 失败: $CURRENT_IP" && exit 1
+log_info "当前出口IP: $CURRENT_IP"
 
 record_name="$SUBDOMAIN.$DOMAIN"
 
 # ===== 第一步：先查询 Cloudflare API 获取 Zone ID =====
-echo "正在获取Cloudflare Zone ID..."
+log_info "正在获取Cloudflare Zone ID..."
 zone_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
     -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
 ZONE_ID=$(echo "$zone_json" | jq -r '.result[0].id')
-[ -z "$ZONE_ID" ] || [ "$ZONE_ID" == "null" ] && echo "无法获取 Zone ID" && exit 1
-echo "Zone ID: $ZONE_ID"
+[ -z "$ZONE_ID" ] || [ "$ZONE_ID" == "null" ] && log_event "无法获取 Zone ID" && exit 1
+log_info "Zone ID: $ZONE_ID"
 
 # ===== 第二步：查询 Cloudflare 上该域名的所有同类型 DNS 记录 =====
-echo "正在查询Cloudflare上的DNS记录..."
+log_info "正在查询Cloudflare上的DNS记录..."
 record_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$record_name&type=$RECORD_TYPE" \
     -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
 
 # 检查 API 调用是否成功
 api_success=$(echo "$record_json" | jq -r '.success')
 if [ "$api_success" != "true" ]; then
-    echo "Cloudflare API 查询失败，跳过本次更新以避免创建重复记录"
+    log_event "Cloudflare API 查询失败，跳过本次更新以避免创建重复记录"
     echo "API 响应: $record_json"
     exit 1
 fi
 
 # 获取记录数量
 record_count=$(echo "$record_json" | jq '.result | length')
-echo "找到 $record_count 条现有记录"
+log_info "找到 $record_count 条现有记录"
 
 # ===== 第三步：如果有多条重复记录，清理多余的，只保留第一条 =====
 if [ "$record_count" -gt 1 ]; then
-    echo "检测到 $record_count 条重复记录，正在清理多余记录..."
+    log_event "检测到 $record_count 条重复记录，正在清理多余记录..."
     # 保留第一条，删除其余的
     for i in $(seq 1 $((record_count - 1))); do
         dup_id=$(echo "$record_json" | jq -r ".result[$i].id")
@@ -167,28 +179,28 @@ RECORD_IP=$(echo "$record_json" | jq -r '.result[0].content')
 if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
     # 确实没有记录，创建新的
     OLD_IP="无 (新建记录)"
-    echo "记录不存在，创建中..."
+    log_event "记录不存在，创建中..."
     response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
         -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
         --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":60,\"proxied\":false}")
 else
     # 记录已存在，检查 IP 是否一致
     if [ "$CURRENT_IP" == "$RECORD_IP" ]; then
-        echo "出口 IP 与 Cloudflare 记录一致，无需更新 ($CURRENT_IP)"
+        log_info "出口 IP 与 Cloudflare 记录一致，无需更新 ($CURRENT_IP)"
         exit 0
     fi
     OLD_IP="$RECORD_IP"
-    echo "IP不一致 (Cloudflare=$RECORD_IP, 当前=$CURRENT_IP)，更新中... Record ID: $RECORD_ID"
+    log_event "IP不一致 (Cloudflare=$RECORD_IP, 当前=$CURRENT_IP)，更新中... Record ID: $RECORD_ID"
     response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
         -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
         --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":60,\"proxied\":false}")
 fi
 
 echo "$response" | grep -q '"success":true' && {
-    echo "更新成功: $record_name -> $CURRENT_IP"
+    log_event "更新成功: $record_name -> $CURRENT_IP"
     send_telegram "$OLD_IP" "$CURRENT_IP"
 } || {
-    echo "更新失败"
+    log_event "更新失败"
     echo "$response"
     exit 1
 }
