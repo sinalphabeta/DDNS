@@ -69,7 +69,7 @@ send_telegram() {
 🕐 时间: <code>$(date '+%Y-%m-%d %H:%M:%S')</code>"
 
     local tg_resp
-    tg_resp=$(curl -s --max-time 10 -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
+    tg_resp=$(curl -s --max-time 10 "${DOH_OPTS[@]}" -X POST "https://api.telegram.org/bot$TG_BOT_TOKEN/sendMessage" \
         --data-urlencode "chat_id=$TG_CHAT_ID" \
         --data-urlencode "text=$msg" \
         --data-urlencode "parse_mode=HTML")
@@ -121,21 +121,93 @@ need_cmd jq
 [ -z "$RECORD_TYPE" ] && echo "RECORD_TYPE 未设置" && exit 1
 
 case "$RECORD_TYPE" in
-    A)    IP_URL="ip.sb"; CURL_OPTS="-4" ;;
-    AAAA) IP_URL="ip.sb"; CURL_OPTS="-6" ;;
+    A)    CURL_OPTS="-4" ;;
+    AAAA) CURL_OPTS="-6" ;;
     *)    echo "RECORD_TYPE 必须为 A 或 AAAA" && exit 1 ;;
 esac
 
+# IP 查询站点列表，按顺序尝试，任一返回有效 IP 即成功
+if [ "$RECORD_TYPE" = "A" ]; then
+    IP_SITES=(
+        "https://ipinfo.io/ip"
+        "https://api.ipify.org"
+        "https://checkip.amazonaws.com"
+        "https://ip.sb"
+        "https://ifconfig.me"
+        "https://icanhazip.com"
+        "https://ident.me"
+    )
+else
+    IP_SITES=(
+        "https://api64.ipify.org"
+        "https://ip.sb"
+        "https://ifconfig.me"
+        "https://icanhazip.com"
+        "https://ident.me"
+    )
+fi
+
+# DoH 服务器: 直连全部失败时用其绕过运营商 DNS 劫持
+# 1.1.1.1/8.8.8.8 用 IP 直连，DoH 服务器域名本身被劫持时也能工作
+DOH_URLS=(
+    "https://1.1.1.1/dns-query"
+    "https://8.8.8.8/dns-query"
+    "https://cloudflare-dns.com/dns-query"
+)
+
+# 校验取回的内容确实是一个可用的公网 IP (劫持/错误页会返回 0.0.0.0 或 HTML)
+valid_ip() {
+    local ip="$1"
+    if [ "$RECORD_TYPE" = "A" ]; then
+        [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+        case "$ip" in 0.0.0.0|127.*) return 1 ;; esac
+        local octet
+        for octet in ${ip//./ }; do [ "$octet" -le 255 ] || return 1; done
+    else
+        [[ "$ip" =~ ^[0-9a-fA-F:]+$ && "$ip" == *:* ]] || return 1
+        [ "$ip" = "::" ] && return 1
+    fi
+    return 0
+}
+
+# 获取出口 IP: 先直连轮询所有站点；全部失败再用 DoH 兜底
+# 成功后设置 CURRENT_IP；若靠 DoH 成功，后续 Cloudflare API 请求也走同一 DoH
+DOH_OPTS=()
+get_ip() {
+    local ip site doh
+    for site in "${IP_SITES[@]}"; do
+        ip=$(curl -s --max-time 8 $CURL_OPTS "$site" | tr -d '[:space:]')
+        valid_ip "$ip" && { CURRENT_IP="$ip"; return 0; }
+        log_info "获取失败: $site"
+    done
+    if ! curl --help all 2>/dev/null | grep -q -- --doh-url; then
+        log_event "警告: 当前 curl 不支持 --doh-url (需 7.62+)，无法使用 DoH 兜底"
+        return 1
+    fi
+    log_info "直连全部失败，尝试 DoH 绕过 DNS 劫持..."
+    for doh in "${DOH_URLS[@]}"; do
+        for site in "${IP_SITES[@]}"; do
+            ip=$(curl -s --max-time 8 $CURL_OPTS --doh-url "$doh" "$site" 2>/dev/null | tr -d '[:space:]')
+            valid_ip "$ip" && {
+                CURRENT_IP="$ip"
+                DOH_OPTS=(--doh-url "$doh")
+                log_event "系统 DNS 疑似被劫持，已切换 DoH ($doh) 获取到 IP"
+                return 0
+            }
+        done
+    done
+    return 1
+}
+
 log_info "正在获取当前出口IP..."
-CURRENT_IP=$(curl -s --max-time 10 $CURL_OPTS "$IP_URL")
-[[ ! "$CURRENT_IP" =~ ^[0-9a-fA-F\.:]+$ ]] && log_event "获取出口 IP 失败: $CURRENT_IP" && exit 1
+get_ip || { log_event "获取出口 IP 失败: 所有站点(含 DoH)均不可用"; exit 1; }
 log_info "当前出口IP: $CURRENT_IP"
 
 record_name="$SUBDOMAIN.$DOMAIN"
 
 # ===== 第一步：先查询 Cloudflare API 获取 Zone ID =====
 log_info "正在获取Cloudflare Zone ID..."
-zone_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
+zone_json=$(curl -s "${DOH_OPTS[@]}" -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
     -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
 ZONE_ID=$(echo "$zone_json" | jq -r '.result[0].id')
 [ -z "$ZONE_ID" ] || [ "$ZONE_ID" == "null" ] && log_event "无法获取 Zone ID" && exit 1
@@ -143,7 +215,7 @@ log_info "Zone ID: $ZONE_ID"
 
 # ===== 第二步：查询 Cloudflare 上该域名的所有同类型 DNS 记录 =====
 log_info "正在查询Cloudflare上的DNS记录..."
-record_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$record_name&type=$RECORD_TYPE" \
+record_json=$(curl -s "${DOH_OPTS[@]}" -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?name=$record_name&type=$RECORD_TYPE" \
     -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
 
 # 检查 API 调用是否成功
@@ -166,7 +238,7 @@ if [ "$record_count" -gt 1 ]; then
         dup_id=$(echo "$record_json" | jq -r ".result[$i].id")
         dup_ip=$(echo "$record_json" | jq -r ".result[$i].content")
         echo "  删除重复记录: ID=$dup_id, IP=$dup_ip"
-        del_resp=$(curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$dup_id" \
+        del_resp=$(curl -s "${DOH_OPTS[@]}" -X DELETE "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$dup_id" \
             -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json")
         echo "$del_resp" | grep -q '"success":true' && echo "  删除成功" || echo "  删除失败: $del_resp"
     done
@@ -180,7 +252,7 @@ if [ -z "$RECORD_ID" ] || [ "$RECORD_ID" == "null" ]; then
     # 确实没有记录，创建新的
     OLD_IP="无 (新建记录)"
     log_event "记录不存在，创建中..."
-    response=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
+    response=$(curl -s "${DOH_OPTS[@]}" -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
         -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
         --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":60,\"proxied\":false}")
 else
@@ -191,7 +263,7 @@ else
     fi
     OLD_IP="$RECORD_IP"
     log_event "IP不一致 (Cloudflare=$RECORD_IP, 当前=$CURRENT_IP)，更新中... Record ID: $RECORD_ID"
-    response=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
+    response=$(curl -s "${DOH_OPTS[@]}" -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
         -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
         --data "{\"type\":\"$RECORD_TYPE\",\"name\":\"$record_name\",\"content\":\"$CURRENT_IP\",\"ttl\":60,\"proxied\":false}")
 fi
