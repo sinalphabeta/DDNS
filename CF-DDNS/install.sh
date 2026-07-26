@@ -76,6 +76,34 @@ fi
 
 chmod +x "$SCRIPT_NAME"
 
+# Ensure crontab exists (minimal images often ship without cron)
+if ! command -v crontab >/dev/null 2>&1; then
+    echo -e "${YELLOW}crontab not found, installing...${NC}"
+    if [ -f /etc/debian_version ]; then
+        apt update -qq && apt install -y -qq cron
+    elif [ -f /etc/redhat-release ]; then
+        yum install -y cronie
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache cronie
+    elif command -v opkg >/dev/null 2>&1; then
+        opkg update && opkg install cron
+    fi
+    if ! command -v crontab >/dev/null 2>&1; then
+        echo -e "${RED}Error: failed to install cron, please install it manually.${NC}"
+        exit 1
+    fi
+fi
+
+# Make sure the cron daemon is enabled and running (fresh installs may not start it)
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl enable --now cron 2>/dev/null || systemctl enable --now crond 2>/dev/null || systemctl enable --now cronie 2>/dev/null
+elif command -v rc-service >/dev/null 2>&1; then
+    rc-update add crond default 2>/dev/null
+    rc-service crond start 2>/dev/null
+elif command -v service >/dev/null 2>&1; then
+    service cron start 2>/dev/null || service crond start 2>/dev/null
+fi
+
 # Configure Cron
 echo -e "Configuring Crontab..."
 if [ -n "$DDNS_ARGS" ]; then
