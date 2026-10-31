@@ -67,7 +67,8 @@ bash <(curl -s https://raw.githubusercontent.com/sinalphabeta/DDNS/main/ALI-DDNS
   --access-key-secret "你的 AccessKey Secret" \
   --domain example.com \
   --subdomain home \
-  --type A
+  --type A \
+  --ttl 1
 ```
 
 根域名的主机记录填 `@`。免费版云解析 TTL 最小 600 秒，脚本默认就是 600。
